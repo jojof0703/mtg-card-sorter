@@ -1,27 +1,30 @@
-# MTG Card Sorter
+# MTG Inbox Dataset Builder
 
-Sort Magic: The Gathering cards using **Google Cloud Vision OCR** and **Scryfall API**.
+Build controlled datasets of Magic: The Gathering card images for sorting and OCR evaluation. Downloads images from **Scryfall**, organizes them into groups, seeds an inbox, and measures identification accuracy with **Google Cloud Vision OCR**.
 
 ---
 
-## For Complete Beginners
+## What This Project Does
 
-**What does this project do?** You take photos of MTG (Magic: The Gathering) cards, and the app identifies each card and sorts them into folders (by color, type, or value). No manual typing needed.
+This project focuses on the **programs that create the inbox dataset**—the images that get sorted. You can:
 
-**Key terms:**
-- **OCR** = Optical Character Recognition. Software that "reads" text from an image. We use Google's Vision API.
-- **Scryfall** = A free online database of all MTG cards. We look up cards by name, set code (e.g. M21), and collector number (e.g. 123/280).
-- **Set code** = Short identifier for a card set (e.g. M21 = Core Set 2021, DOM = Dominaria).
-- **Collector number** = The card's number within its set (e.g. 123/280 means card 123 of 280).
+1. **Build a dataset** – Download card images from Scryfall into structured groups (lands, creatures, artifacts, multicolor) with ground-truth metadata
+2. **Seed the inbox** – Copy sample images from the dataset into `data/inbox/` for demo or testing
+3. **Organize by type** – Sort dataset images into Creatures/Spells/Permanents/Lands using metadata (no OCR)
+4. **Rename files** – Convert UUID filenames to `Card Name (set).png` for readability
+5. **Run OCR evaluation** – Measure how accurately Vision OCR + Scryfall identify cards from the dataset
 
-**Project structure (where to look):**
-- `src/cli.py` – Main entry point. Interactive menu and commands.
-- `src/pipeline.py` – Core workflow: image → OCR → parse → Scryfall → card.
-- `src/ocr_parsing.py` – Extracts name, set, collector number from OCR text (regex-heavy).
-- `src/sorting.py` – Puts cards into 4 groups (color, type, or value).
-- `src/models.py` – CardRecord: what a "card" looks like in our app.
-- `src/cache.py` – Saves OCR and Scryfall results so we don't repeat API calls.
-- `scripts/` – Helper scripts for testing and debugging.
+The built dataset is the foundation: it provides known card images and metadata for inbox seeding, OCR benchmarking, and downstream sorting.
+
+---
+
+## Key Terms
+
+- **Scryfall** – Free online database of all MTG cards. We download images and look up cards by name, set code (e.g. M21), and collector number.
+- **Inbox** – `data/inbox/` where you place card images to be processed and sorted.
+- **OCR** – Optical Character Recognition. Google Vision reads text from images so we can identify cards.
+- **Set code** – Short identifier (e.g. M21 = Core Set 2021, DOM = Dominaria).
+- **Collector number** – Card’s number within its set (e.g. 123/280).
 
 ---
 
@@ -35,90 +38,68 @@ Sort Magic: The Gathering cards using **Google Cloud Vision OCR** and **Scryfall
 
 2. **Google Cloud Vision**
 
-   Place your service account JSON key at `credentials/google-vision-key.json`. The app loads it automatically from there (no env var needed).
-
-3. **Run**
-
-   - **CLI**: `python main.py` or `python -m src.cli`
-   - **Web UI**: `python -m src.app` then open http://127.0.0.1:5000
-
-## Pipeline
-
-1. **Capture** – Take photos of cards (or use existing images).
-2. **OCR** – Google Vision `DOCUMENT_TEXT_DETECTION` extracts text.
-3. **Parse** – Extract collector number (e.g. `123/280` → `123`), set code (3-letter), and card name.
-4. **Identify** – Scryfall lookup in order:
-   - `GET /cards/{set}/{collector_number}` if set + number available
-   - `GET /cards/named?fuzzy={name}` otherwise
-   - `GET /cards/search?q={query}` if fuzzy fails; best match by similarity
-5. **Store** – Results cached locally (OCR + Scryfall) so re-scanning is fast.
-6. **Sort** – Choose one of 3 modes, each with 4 groups.
-
-## Sort Modes
-
-### A. Color Bucket
-
-- **Mono-Color** – Exactly 1 color
-- **Multi-Color** – 2+ colors
-- **Colorless** – No colors (e.g. artifacts)
-- **Lands** – `type_line` contains "Land" (always, even if colored)
-
-### B. Card Type
-
-- **Creatures** – Creature
-- **Spells** – Instant or Sorcery
-- **Permanents** – Artifact, Enchantment, or Planeswalker
-- **Lands** – Land
-
-### C. Value
-
-- **Hits** – Mythic OR USD ≥ $10
-- **Good Stuff** – Rare OR USD $2–$9.99
-- **Playable Commons/Uncommons** – Uncommon OR USD $0.50–$1.99
-- **Bulk** – Common OR USD &lt; $0.50 OR missing price
-
-Uses the higher of `usd` and `usd_foil` when both exist.
-
-## Error Handling
-
-- **OCR fails** – Message: re-take photo with better lighting and fill frame.
-- **Multiple Scryfall matches** – CLI shows top 3 candidates for manual selection.
-
-## API Etiquette
-
-- Scryfall requests use `User-Agent: MTGCardSorter/1.0 (School Project)`
-- ~100 ms delay between Scryfall requests
-- OCR and Scryfall results cached in `~/.mtg_card_sorter/`
+   Place your service account JSON key at `credentials/google-vision-key.json`. The app loads it from there (no env var needed).
 
 ---
 
-## Dataset Harness (OCR Evaluation)
+## Dataset Creation Pipeline
 
-Reproducible Option B dataset: download Scryfall card images, run Vision OCR, measure identification accuracy.
+### 1. Build dataset
 
-### Setup
-
-Same as above: place your service account JSON at `credentials/google-vision-key.json`.
-
-### Build dataset
-
-Downloads 4 groups (lands, creatures, artifacts, multicolor), 50 images per group by default:
+Downloads card images from Scryfall into 4 groups with metadata:
 
 ```bash
 python -m src.cli dataset build --name baseline_v1 --per_group 50 --out data/datasets
 ```
 
-Use `--prints` (default) for different printings per card, or `--cards` for one per card name.
+- `--prints` (default): Different printings per card (e.g. Lightning Bolt from M10 and M21)
+- `--cards`: One image per card name
 
-### Run OCR evaluation
+### 2. Seed inbox
 
-Runs Vision OCR on dataset images, identifies cards via Scryfall, compares to ground truth:
+Copy random images from the dataset into the inbox for demo:
+
+```bash
+python -m src.cli scan-inbox --seed 5
+```
+
+Requires a built dataset at `data/datasets/baseline_v1/`.
+
+### 3. Organize dataset by type (optional)
+
+Sort downloaded images into Creatures/Spells/Permanents/Lands using metadata (no OCR):
+
+```bash
+python scripts/sort_dataset_by_type.py baseline_v1
+```
+
+Output: `data/datasets/baseline_v1/sorted_by_type/`.
+
+### 4. Rename to card names (optional)
+
+Convert UUID filenames to `Card Name (set).png` in inbox and sorted folders:
+
+```bash
+python scripts/rename_to_card_names.py
+```
+
+Use `--dry-run` to preview changes.
+
+---
+
+## OCR Evaluation
+
+Measure how accurately Vision OCR + Scryfall identify cards from the dataset:
 
 ```bash
 python -m src.cli dataset ocr-eval --name baseline_v1 --out data/datasets --limit 200
 ```
 
-### Output layout
+Output: `results.json` (accuracy, by-group stats), `failures.csv` (wrong/missed cards). Use `scripts/debug_ocr_failure.py` to inspect individual failures.
+
+---
+
+## Dataset Layout
 
 ```
 data/datasets/<name>/
@@ -127,8 +108,43 @@ data/datasets/<name>/
 │   ├── creatures/
 │   ├── artifacts/
 │   └── multicolor/
-├── metadata.jsonl      # One record per image
+├── metadata.jsonl      # Ground truth: name, set, collector_number, type_line, etc.
 ├── ocr/                # Cached OCR text (per image)
-├── results.json        # Accuracy, by-group stats
-└── failures.csv        # Failed identifications with details
+├── results.json        # OCR eval accuracy
+├── failures.csv        # Failed identifications
+└── sorted_by_type/     # Optional: Creatures/, Spells/, Permanents/, Lands/
 ```
+
+---
+
+## Downstream: Scan Inbox
+
+Once the inbox has images (from seeding or your own photos), process and sort them:
+
+```bash
+python -m src.cli scan-inbox --inbox data/inbox --out data/sorted --mode type
+```
+
+Modes: `color`, `type`, or `value`. See `src/sorting.py` for group definitions.
+
+---
+
+## Project Structure
+
+| Path | Purpose |
+|------|---------|
+| `src/dataset/build_dataset.py` | Download Scryfall images, write metadata.jsonl |
+| `src/dataset/scan_inbox.py` | Seed inbox, scan images, OCR + sort |
+| `src/dataset/ocr_eval.py` | Run OCR evaluation, compare to ground truth |
+| `scripts/sort_dataset_by_type.py` | Organize dataset images by type (metadata only) |
+| `scripts/rename_to_card_names.py` | UUID → `Card Name (set).png` |
+| `scripts/debug_ocr_failure.py` | Inspect OCR eval failures |
+| `src/ocr_parsing.py` | Parse name, set, collector number from OCR text |
+| `src/services/vision_ocr.py` | Google Cloud Vision integration |
+
+---
+
+## API Etiquette
+
+- Scryfall: `User-Agent: MTGCardSorter/1.0 (School Project)`, ~100 ms delay between requests
+- OCR and Scryfall results cached in `~/.mtg_card_sorter/`
