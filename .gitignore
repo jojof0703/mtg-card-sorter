@@ -1,0 +1,16 @@
+# Credentials - never commit
+credentials/
+mtg-ocr-key.json
+*-key.json
+.env
+.env.local
+
+# Dataset outputs
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
