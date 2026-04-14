@@ -1,24 +1,15 @@
 """
-Command-Line Interface (CLI) for MTG Card Sorter.
+CLI (terminal) for this project.
 
-This is the main entry point when you run the program from the terminal.
-It provides two ways to use the app:
+Simple usage:
+1) `python -m src.cli` -> interactive menu
+2) `python -m src.cli scan-inbox ...` -> run one command directly
 
-1. INTERACTIVE MODE (default): Run `python -m src.cli` with no arguments.
-   You'll see a menu to scan images, sort cards, clear data, or quit.
-
-2. COMMAND MODE: Run specific commands like:
-   - `python -m src.cli dataset build`     - Download card images for testing
-   - `python -m src.cli dataset ocr-eval`  - Measure how accurate our OCR is
-   - `python -m src.cli scan-inbox`        - Process images in data/inbox and sort them
-
-MTG = Magic: The Gathering, a trading card game. Each card has a name,
-set code (e.g. "M21"), and collector number (e.g. "123/280").
+This text is intentionally simple for beginner readers.
 """
 
 import argparse
 import json
-import shutil
 import sys
 from pathlib import Path
 
@@ -150,55 +141,14 @@ def main() -> int:
     return 0
 
 
-def _cmd_dataset_build(args: argparse.Namespace) -> int:
-    """Build dataset: download card images from Scryfall into data/datasets/<name>/."""
-    from src.dataset.build_dataset import build_dataset
-
-    out = Path(args.out)
-    build_dataset(
-        name=args.name,
-        per_group=args.per_group,
-        out_dir=out,
-        unique="prints" if args.prints else "cards",
-    )
-    print(f"Dataset built: {out / args.name}")
-    return 0
-
-
 def _cmd_scan_inbox(args: argparse.Namespace) -> int:
     """Scan images in inbox, identify cards, sort into output folders."""
-    from src.dataset.scan_inbox import scan_and_sort, seed_inbox
+    from src.dataset.scan_inbox import scan_and_sort
 
     inbox = Path(args.inbox).resolve()
     out_dir = Path(args.out_dir).resolve()
     mode = args.mode
-    phone_inbox = (Path("data") / "Magic the gathering Iphone").resolve()
-
-    # Guard rail: sorted_phone_dataset is reserved for iPhone photos only.
-    if out_dir.name.lower() == "sorted_phone_dataset":
-        if inbox != phone_inbox:
-            print(
-                "Error: data/sorted_phone_dataset can only be generated from "
-                "data/Magic the gathering Iphone."
-            )
-            print(f"Use --in \"{phone_inbox}\" when writing to sorted_phone_dataset.")
-            return 1
-        # Start fresh each run so this folder only contains the latest iPhone sort.
-        if out_dir.exists():
-            shutil.rmtree(out_dir)
-
-    if getattr(args, "seed", None) is not None:
-        dataset_root = (Path("data/datasets") / "baseline_v1").resolve()
-        if not dataset_root.exists():
-            print(f"Error: dataset not found at {dataset_root}. Run: python -m src.cli dataset build")
-            return 1
-        n = seed_inbox(inbox, dataset_root, args.seed)
-        print(f"Seeded inbox with {n} images from dataset.")
-
-    # Timing-focused phone dataset runs should be cold (no cache),
-    # so the overlaid time reflects full OCR+lookup work.
-    use_cache = out_dir.name.lower() != "sorted_phone_dataset"
-    ok, err_count, errors = scan_and_sort(inbox, out_dir, mode=mode, use_cache=use_cache)
+    ok, err_count, errors = scan_and_sort(inbox, out_dir, mode=mode, use_cache=True)
     if ok == 0 and err_count == 0:
         print(f"No images in {inbox}. Add .png/.jpg files or use --seed 5 to copy samples.")
         return 0
@@ -210,72 +160,22 @@ def _cmd_scan_inbox(args: argparse.Namespace) -> int:
     return 0 if err_count == 0 else 1
 
 
-def _cmd_dataset_ocr_eval(args: argparse.Namespace) -> int:
-    """Run OCR evaluation on dataset: measure identification accuracy."""
-    from src.dataset.ocr_eval import run_ocr_eval, write_results
-
-    out = Path(args.out)
-    dataset_root = out / args.name
-    if not dataset_root.exists():
-        print(f"Error: dataset not found at {dataset_root}")
-        return 1
-
-    results = run_ocr_eval(
-        dataset_root=dataset_root,
-        limit=args.limit,
-        use_document_ocr=True,
-    )
-    write_results(dataset_root, results)
-
-    print(f"Accuracy: {results['accuracy']:.1%} ({results['correct']}/{results['total']})")
-    print("By group:", results["by_group"])
-    print(f"Failures: {results['failures_count']} -> failures.csv")
-    print(f"Results: {dataset_root / 'results.json'}")
-    return 0
-
-
 def _parse_args() -> argparse.Namespace:
-    """Parse command-line arguments. Defines subcommands: dataset (build, ocr-eval), scan-inbox."""
+    """Parse command-line arguments. Defines subcommands: scan-inbox."""
     parser = argparse.ArgumentParser(prog="mtg-card-sorter")
     subparsers = parser.add_subparsers(dest="command", help="Commands")
-
-    ds_parser = subparsers.add_parser("dataset", help="Dataset harness")
-    ds_sub = ds_parser.add_subparsers(dest="dataset_cmd", required=True)
-
-    build_p = ds_sub.add_parser("build", help="Build dataset from Scryfall")
-    build_p.add_argument("--name", default="baseline_v1", help="Dataset name")
-    build_p.add_argument("--per_group", type=int, default=50, help="Images per group")
-    build_p.add_argument("--out", default="data/datasets", help="Output directory")
-    build_p.add_argument("--prints", action="store_true", help="unique=prints (default)")
-    build_p.add_argument("--cards", dest="prints", action="store_false", help="unique=cards")
-    build_p.set_defaults(prints=True)
-
-    eval_p = ds_sub.add_parser("ocr-eval", help="Run OCR evaluation")
-    eval_p.add_argument("--name", default="baseline_v1", help="Dataset name")
-    eval_p.add_argument("--out", default="data/datasets", help="Dataset root")
-    eval_p.add_argument("--limit", type=int, default=200, help="Max items to evaluate")
 
     scan_p = subparsers.add_parser("scan-inbox", help="OCR images in inbox, sort into folders")
     scan_p.add_argument("--in", dest="inbox", default="data/inbox", help="Input directory with images")
     scan_p.add_argument("--out", dest="out_dir", default="data/sorted", help="Output directory for sorted folders")
     scan_p.add_argument("--mode", choices=["color", "type", "value"], default="type",
                         help="Sort mode: color, type (Creatures/Lands/etc), or value")
-    scan_p.add_argument("--seed", type=int, metavar="N",
-                        help="Copy N random images from dataset into inbox first (for demo)")
 
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     args = _parse_args()
-
-    if args.command == "dataset":
-        if args.dataset_cmd == "build":
-            sys.exit(_cmd_dataset_build(args))
-        if args.dataset_cmd == "ocr-eval":
-            sys.exit(_cmd_dataset_ocr_eval(args))
-        print("Use: dataset build | dataset ocr-eval")
-        sys.exit(1)
 
     if args.command == "scan-inbox":
         sys.exit(_cmd_scan_inbox(args))
