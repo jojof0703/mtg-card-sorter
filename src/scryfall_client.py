@@ -21,6 +21,8 @@ import requests
 
 USER_AGENT = "MTGCardSorter/1.0 (School Project; +https://github.com)"
 RATE_LIMIT_DELAY_SEC = 0.1  # 100ms between requests per Scryfall guidelines
+MAX_RETRIES = 3
+RETRY_BACKOFF_SEC = 0.25
 
 
 class ScryfallClient:
@@ -49,15 +51,26 @@ class ScryfallClient:
         self._last_request = time.monotonic()
 
     def _get(self, url: str) -> Optional[dict]:
-        self._rate_limit()
-        try:
-            r = self._session.get(url, timeout=15)
-            if r.status_code == 404:
+        for attempt in range(MAX_RETRIES):
+            self._rate_limit()
+            try:
+                r = self._session.get(url, timeout=15)
+                if r.status_code == 404:
+                    return None
+                # Retry transient throttling/server errors.
+                if r.status_code in (429, 500, 502, 503, 504):
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(RETRY_BACKOFF_SEC * (attempt + 1))
+                        continue
+                    return None
+                r.raise_for_status()
+                return r.json()
+            except requests.RequestException:
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_BACKOFF_SEC * (attempt + 1))
+                    continue
                 return None
-            r.raise_for_status()
-            return r.json()
-        except requests.RequestException:
-            return None
+        return None
 
     def get_by_id(self, scryfall_id: str) -> Optional[dict]:
         """Lookup by Scryfall UUID: GET /cards/{id}."""
@@ -132,6 +145,11 @@ class ScryfallClient:
             card = self.get_by_exact_name(card_name, set_code)
             if card:
                 return card
+            # OCR sometimes misreads set code; retry exact name without set constraint.
+            if set_code:
+                card = self.get_by_exact_name(card_name, None)
+                if card:
+                    return card
 
         # 3. Fuzzy name (accept only if confidence is high)
         if card_name:
@@ -140,6 +158,13 @@ class ScryfallClient:
                 fuzzy_score = _similarity(card_name, card.get("name", ""))
                 if fuzzy_score >= _minimum_confidence(card_name):
                     return card
+            # If set code is noisy, retry fuzzy without set.
+            if set_code:
+                card = self.get_by_fuzzy_name(card_name, None)
+                if card:
+                    fuzzy_score = _similarity(card_name, card.get("name", ""))
+                    if fuzzy_score >= _minimum_confidence(card_name):
+                        return card
 
         # 4. Search
         if not card_name:

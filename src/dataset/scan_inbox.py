@@ -40,6 +40,7 @@ def scan_and_sort(
     out_dir: Path,
     mode: SortMode = "type",
     on_ambiguous=None,
+    use_cache: bool = True,
 ) -> tuple[int, int, list[tuple[str, str]]]:
     """
     Process all images in inbox, sort by mode, copy to out_dir subfolders.
@@ -65,7 +66,7 @@ def scan_and_sort(
     for path in images:
         path = path.resolve()
         started_at = time.perf_counter()
-        record, err = process_image(path, scryfall, on_ambiguous, use_cache=True)
+        record, err = process_image(path, scryfall, on_ambiguous, use_cache=use_cache)
         elapsed = time.perf_counter() - started_at
         if record:
             cards.append(record)

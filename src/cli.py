@@ -195,7 +195,10 @@ def _cmd_scan_inbox(args: argparse.Namespace) -> int:
         n = seed_inbox(inbox, dataset_root, args.seed)
         print(f"Seeded inbox with {n} images from dataset.")
 
-    ok, err_count, errors = scan_and_sort(inbox, out_dir, mode=mode)
+    # Timing-focused phone dataset runs should be cold (no cache),
+    # so the overlaid time reflects full OCR+lookup work.
+    use_cache = out_dir.name.lower() != "sorted_phone_dataset"
+    ok, err_count, errors = scan_and_sort(inbox, out_dir, mode=mode, use_cache=use_cache)
     if ok == 0 and err_count == 0:
         print(f"No images in {inbox}. Add .png/.jpg files or use --seed 5 to copy samples.")
         return 0
