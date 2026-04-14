@@ -2,8 +2,6 @@
 
 This folder has the main program code.
 
-If English is not your first language, use this map:
-
 - `cli.py`  
   Terminal commands (`scan-inbox` command).
 
