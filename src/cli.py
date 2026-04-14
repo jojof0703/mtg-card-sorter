@@ -18,6 +18,7 @@ set code (e.g. "M21"), and collector number (e.g. "123/280").
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -171,6 +172,20 @@ def _cmd_scan_inbox(args: argparse.Namespace) -> int:
     inbox = Path(args.inbox).resolve()
     out_dir = Path(args.out_dir).resolve()
     mode = args.mode
+    phone_inbox = (Path("data") / "Magic the gathering Iphone").resolve()
+
+    # Guard rail: sorted_phone_dataset is reserved for iPhone photos only.
+    if out_dir.name.lower() == "sorted_phone_dataset":
+        if inbox != phone_inbox:
+            print(
+                "Error: data/sorted_phone_dataset can only be generated from "
+                "data/Magic the gathering Iphone."
+            )
+            print(f"Use --in \"{phone_inbox}\" when writing to sorted_phone_dataset.")
+            return 1
+        # Start fresh each run so this folder only contains the latest iPhone sort.
+        if out_dir.exists():
+            shutil.rmtree(out_dir)
 
     if getattr(args, "seed", None) is not None:
         dataset_root = (Path("data/datasets") / "baseline_v1").resolve()

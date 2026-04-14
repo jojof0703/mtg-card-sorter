@@ -126,7 +126,8 @@ def _copy_with_timing_overlay(src: Path, dest: Path, elapsed_seconds: float) -> 
 
     The text is white on a tightly padded black background.
     """
-    label = f"Sort time: {elapsed_seconds:.2f}s"
+    elapsed_ms = elapsed_seconds * 1000
+    label = f"Sort time: {elapsed_seconds:.3f}s ({elapsed_ms:.1f} ms)"
     try:
         with Image.open(src) as image:
             image = image.convert("RGB")
