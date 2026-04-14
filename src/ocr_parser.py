@@ -12,7 +12,7 @@ The pipeline uses ParsedOCR to decide what to send to Scryfall.
 import re
 from dataclasses import dataclass
 
-from src.ocr_parsing import parse_ocr_for_lookup
+from src.ocr_parsing import parse_name_candidates, parse_ocr_for_lookup
 
 
 @dataclass
@@ -51,3 +51,15 @@ def parse_ocr_text(raw_text: str) -> ParsedOCR:
         card_name=_clean_name(name) if name else "",
         raw_text=raw_text or "",
     )
+
+
+def parse_ocr_name_candidates(raw_text: str, max_candidates: int = 5) -> list[str]:
+    """
+    Return likely card-name candidates from OCR text, ordered best-first.
+    """
+    if not raw_text or not raw_text.strip():
+        return []
+    lines = [ln.strip() for ln in raw_text.strip().splitlines() if ln.strip()]
+    if not lines:
+        return []
+    return parse_name_candidates(lines, max_candidates=max_candidates)
