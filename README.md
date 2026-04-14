@@ -7,8 +7,6 @@ The app can sort by:
 - `color`
 - `value`
 
-This README uses simple English for new users and for readers whose first language is not English.
-
 ---
 
 ## 1) What You Need
