@@ -23,7 +23,66 @@ from pathlib import Path
 
 from src.cache import _cache_dir
 from src.models import CardRecord
+import cv2
+import time
 
+from src.pipeline import process_image
+
+
+def run_camera_scan(scryfall):
+    import cv2
+    import time
+
+    cam = cv2.VideoCapture(1)
+
+    last_time = 0
+    cooldown = 2
+    last_result = None
+
+    print("Starting camera... press Q to quit")
+
+    while True:
+        ret, frame = cam.read()
+        if not ret:
+            continue
+
+        #h, w, _ = frame.shape
+        #frame_crop = frame[int(h*0.2):int(h*0.8), int(w*0.2):int(w*0.8)]
+
+        now = time.time()
+
+        if now - last_time > cooldown:
+            try:
+                record, err = process_image(frame, scryfall)
+            except Exception as e:
+                print("OCR error:", e)
+                record = None
+
+            last_time = now
+
+            if record:
+                last_result = record
+                print("CARD:", getattr(record, "name", record))
+
+        if last_result:
+            cv2.putText(
+                frame,
+                getattr(last_result, "name", str(last_result)),
+                (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 255, 0),
+                2,
+            )
+
+        cv2.imshow("MTG Camera Scan", frame)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    cam.release()
+    cv2.destroyAllWindows()
+    
 SORT_MODES = {
     "1": ("color", "Color Bucket (Mono/Multi/Colorless/Lands)"),
     "2": ("type", "Card Type (Creatures/Spells/Permanents/Lands)"),
@@ -107,6 +166,7 @@ def main() -> int:
         print("  2. Sort & view bins")
         print("  3. Clear all cards")
         print("  4. Quit")
+        print("  5. Use Phone Camera To Scan")
         choice = input("Choice: ").strip()
 
         if choice == "4":
@@ -145,6 +205,10 @@ def main() -> int:
             cards = []
             _save_cards(cards)
             print("  Cleared.")
+
+        elif choice == "5":
+            run_camera_scan(scryfall)
+
 
     return 0
 
