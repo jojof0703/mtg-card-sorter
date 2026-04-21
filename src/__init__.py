@@ -1,6 +1,11 @@
 """
-MTG Card Sorter - OCR + Scryfall + sorting.
+Core package for MTG card sorting.
 
-This package identifies MTG cards from photos and sorts them by color,
-type, or value. Main entry: python -m src.cli (CLI) or python -m src.app (web).
+Simple idea:
+1) read text from card image (OCR)
+2) find the card on Scryfall
+3) place card in a sorting bin
+
+Main command entry:
+    python -m src.cli
 """

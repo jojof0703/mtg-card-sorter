@@ -13,8 +13,11 @@ Useful for batch processing: drop 50 photos in inbox, run once, get organized fo
 
 import random
 import shutil
+import time
 from pathlib import Path
 from typing import Literal
+
+from PIL import Image, ImageDraw, ImageFont
 
 from src.models import CardRecord
 from src.scryfall_client import ScryfallClient
@@ -37,6 +40,7 @@ def scan_and_sort(
     out_dir: Path,
     mode: SortMode = "type",
     on_ambiguous=None,
+    use_cache: bool = True,
 ) -> tuple[int, int, list[tuple[str, str]]]:
     """
     Process all images in inbox, sort by mode, copy to out_dir subfolders.
@@ -57,13 +61,17 @@ def scan_and_sort(
     cards: list[CardRecord] = []
     errors: list[tuple[str, str]] = []
     card_to_path: dict[str, Path] = {}
+    card_to_sort_time: dict[str, float] = {}
 
     for path in images:
         path = path.resolve()
-        record, err = process_image(path, scryfall, on_ambiguous, use_cache=True)
+        started_at = time.perf_counter()
+        record, err = process_image(path, scryfall, on_ambiguous, use_cache=use_cache)
+        elapsed = time.perf_counter() - started_at
         if record:
             cards.append(record)
             card_to_path[record.id] = path
+            card_to_sort_time[record.id] = elapsed
         if err:
             errors.append((str(path), err))
 
@@ -87,7 +95,11 @@ def scan_and_sort(
                 else:
                     seen[base] = 1
                 dest = group_dir / f"{base}{src.suffix}"
-                shutil.copy2(src, dest)
+                elapsed = card_to_sort_time.get(card.id)
+                if elapsed is not None:
+                    _copy_with_timing_overlay(src, dest, elapsed)
+                else:
+                    shutil.copy2(src, dest)
 
     return len(cards), len(errors), errors
 
@@ -107,6 +119,40 @@ def _sanitize_filename(name: str) -> str:
     bad = set('/\\:*?"<>|')
     s = "".join("_" if c in bad else c for c in name).strip() or "card"
     return s[:200] if len(s) > 200 else s  # Windows path limit
+
+
+def _copy_with_timing_overlay(src: Path, dest: Path, elapsed_seconds: float) -> None:
+    """
+    Copy image and stamp sort timing at the bottom.
+
+    The text is white on a tightly padded black background.
+    """
+    elapsed_ms = elapsed_seconds * 1000
+    label = f"Sort time: {elapsed_seconds:.3f}s ({elapsed_ms:.1f} ms)"
+    try:
+        with Image.open(src) as image:
+            image = image.convert("RGB")
+            draw = ImageDraw.Draw(image)
+            font = ImageFont.load_default()
+            left, top, right, bottom = draw.textbbox((0, 0), label, font=font)
+            text_width = right - left
+            text_height = bottom - top
+            x_pad = 6
+            y_pad = 3
+            x = (image.width - text_width) // 2
+            y = max(0, image.height - text_height - y_pad * 2 - 8)
+            rect = (
+                max(0, x - x_pad),
+                max(0, y - y_pad),
+                min(image.width, x + text_width + x_pad),
+                min(image.height, y + text_height + y_pad),
+            )
+            draw.rectangle(rect, fill="black")
+            draw.text((x, y), label, fill="white", font=font)
+            image.save(dest)
+    except OSError:
+        # Fall back to plain copy if Pillow cannot decode this image.
+        shutil.copy2(src, dest)
 
 
 def seed_inbox(inbox: Path, dataset_root: Path, count: int = 5) -> int:

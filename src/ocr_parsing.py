@@ -28,13 +28,25 @@ _SET_CODE_EXCLUDE = frozenset({
     "COAST", "WIZARDS", "VIACOM", "COPY", "RIGHT", "YEAR", "GOD", "BAT",
     "ADD", "ONE", "TWO", "PUT", "TAP", "CRE", "SOR", "INS", "ENC",
     "ROGUE", "WARRIOR", "WIZARD", "CLERIC", "SPEND", "MANA", "ONLY",
-    "AVON", "HUMAN", "MONK",  # artist/type-line words mistaken for set codes
+    "AVON", "HUMAN", "MONK", "ILLUS",  # artist/type-line words mistaken for set codes
 })
 
 # Type-line words to skip when extracting card name (first word only)
 _NAME_SKIP_FIRST = frozenset({
     "legendary", "creature", "instant", "sorcery", "artifact", "enchantment",
     "land", "planeswalker", "tribal", "basic", "world",
+})
+
+# One-word type-ish labels that OCR sometimes reads instead of the actual title.
+_NAME_EXACT_EXCLUDE = frozenset({
+    "hero", "vanguard", "scheme", "plane", "phenomenon", "token", "emblem",
+})
+
+# Rules-text starters; if a line begins with one of these, it is usually not a card title.
+_RULES_TEXT_START = frozenset({
+    "you", "when", "whenever", "target", "add", "draw", "until", "tap",
+    "create", "sacrifice", "counter", "destroy", "exile", "choose", "each",
+    "this", "that", "your", "opponent", "players",
 })
 
 
@@ -113,6 +125,9 @@ def parse_collector_number(lines: list[str]) -> Optional[str]:
             num = m.group(1) + m.group(2)
             # Avoid power/toughness (1/1, 2/2, 3/3, 4/4, 5/5) - usually small
             n = int(m.group(1))
+            # Skip copyright years (1990-2030) that OCR often captures.
+            if 1990 <= n <= 2030:
+                continue
             if n >= 10 and n <= 9999:  # Collector numbers typically 10-9999
                 candidates.append((num, 60 - i))
                 continue
@@ -146,7 +161,21 @@ def parse_set_code(lines: list[str]) -> Optional[str]:
         y = int(s)
         return 1990 <= y <= 2030
 
+    def _looks_like_artist_line(s: str) -> bool:
+        tokens = re.findall(r"[A-Za-z]+", s.strip())
+        # Artist credits are commonly 2-3 capitalized words (e.g. "Chuck Lukacs").
+        if 2 <= len(tokens) <= 3 and all(t[:1].isupper() for t in tokens):
+            return True
+        return False
+
     for line in reversed(bottom_lines):
+        line_upper = line.upper()
+        # Ignore artist/copyright lines which frequently produce false "set codes"
+        # like ILLUS, WOTC, or year-like tokens.
+        if "ILLUS" in line_upper or "WIZARDS OF THE COAST" in line_upper:
+            continue
+        if _looks_like_artist_line(line):
+            continue
         tokens = pattern.findall(line)
         for tok in tokens:
             cand = tok.upper()
@@ -183,35 +212,99 @@ def _clean_name_for_lookup(name: str) -> str:
 
 
 def parse_name_guess(lines: list[str]) -> str:
+    candidates = parse_name_candidates(lines, max_candidates=1)
+    return candidates[0] if candidates else ""
+
+
+def parse_name_candidates(lines: list[str], max_candidates: int = 5) -> list[str]:
     """Extract card name from top lines.
 
     - Preserves A- prefix (A-Base Camp, A-Bretagard Stronghold)
     - Skips type-line words as first word (Legendary, Creature, etc.)
-    - Prefers first substantial line that looks like a card name
+    - Prefers substantial title-like lines near the top
     - Strips trailing numbers (OCR often attaches collector to name line)
     - Handles DFC: may get one face; caller can try both if needed
     """
-    for line in lines[:12]:
-        line = _normalize_ocr(line)
-        if len(line) < 3:
+    # We'll score multiple possible "name lines" and keep the best few.
+    # This is safer than trusting just one OCR line, because OCR often picks
+    # up rules text or type lines before the real card title.
+    scored: list[tuple[float, str]] = []
+    seen: set[str] = set()
+
+    for idx, raw_line in enumerate(lines[:16]):
+        line = _normalize_ocr(raw_line)
+        if len(line) < 2:
             continue
-        first_word = line.split()[0].lower() if line.split() else ""
+        if "wizards of the coast" in line.lower() or line.lower().startswith("illus"):
+            continue
+        # Remove leading punctuation that OCR often adds before rules text lines.
+        stripped = re.sub(r"^[^A-Za-z0-9]+", "", line)
+        words = re.findall(r"[A-Za-z0-9'/-]+", stripped)
+        if not words:
+            continue
+        first_word = words[0].lower()
         if first_word in _NAME_SKIP_FIRST:
             continue
         # Must have letters, reasonable length for a card name
-        if not re.search(r"[A-Za-z]", line):
+        if not re.search(r"[A-Za-z]", stripped):
             continue
-        if len(line) < 2 or len(line) > 80:
+        if len(stripped) < 2 or len(stripped) > 80:
             continue
         # Reject lines that look like rules text (start with digit, colon, etc.)
-        if re.match(r"^[\d:•\-\*]", line):
+        if re.match(r"^[\d:•\-\*,.;'\"(]", line):
             continue
-        # Reject single short tokens that are likely not names
-        words = line.split()
+        if first_word in _RULES_TEXT_START:
+            continue
+        # Rules/flavor text is usually sentence-like and long; card names are
+        # usually short title-like phrases.
+        if len(words) >= 5 and (":" in stripped or "," in stripped or "." in stripped):
+            continue
+        if len(words) >= 5 and first_word in {"from", "with", "until", "whenever"}:
+            continue
+
+        cleaned = _clean_name_for_lookup(stripped)
+        if not cleaned:
+            continue
+
+        cleaned_lower = cleaned.lower()
+        if cleaned_lower in seen:
+            continue
+
+        # Reject single short tokens that are likely not names.
         if len(words) == 1 and len(line) < 4:
             continue
-        return _clean_name_for_lookup(line)
-    return ""
+        # Reject bare type-label lines ("Hero", "Token", etc.) that OCR often picks up.
+        if len(words) == 1 and cleaned_lower in _NAME_EXACT_EXCLUDE:
+            continue
+
+        score = 0.0
+        # Nearer to top is better for name lines.
+        score += max(0, 12 - idx) / 12.0
+        # Multi-word titles are often more reliable than isolated single words.
+        score += min(len(words), 4) * 0.15
+        # Penalize long sentence-like lines; names are usually short.
+        if len(words) > 5:
+            score -= (len(words) - 5) * 0.2
+        # Favor title-like capitalization.
+        title_like = sum(1 for w in words if w[:1].isupper())
+        score += title_like * 0.08
+        # Penalize very short one-word fallbacks.
+        if len(words) == 1:
+            score -= 0.05
+        # Penalize lines with punctuation often seen in rules/flavor text.
+        if any(ch in cleaned for ch in [":", ",", ".", "\""]):
+            score -= 0.45
+        if "-" in cleaned and len(words) > 2:
+            score -= 0.2
+
+        seen.add(cleaned_lower)
+        scored.append((score, cleaned))
+
+    if not scored:
+        return []
+    # Highest score first so callers can try the best candidates first.
+    scored.sort(key=lambda x: -x[0])
+    return [name for _, name in scored[:max_candidates]]
 
 
 def parse_ocr_for_lookup(raw_text: str) -> tuple[Optional[str], Optional[str], str]:

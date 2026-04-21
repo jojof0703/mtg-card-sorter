@@ -13,12 +13,16 @@ When multiple cards match a name, we can ask the user to pick (on_ambiguous).
 
 import time
 import urllib.parse
+from difflib import SequenceMatcher
+import re
 from typing import Callable, Optional
 
 import requests
 
 USER_AGENT = "MTGCardSorter/1.0 (School Project; +https://github.com)"
 RATE_LIMIT_DELAY_SEC = 0.1  # 100ms between requests per Scryfall guidelines
+MAX_RETRIES = 3
+RETRY_BACKOFF_SEC = 0.25
 
 
 class ScryfallClient:
@@ -47,15 +51,26 @@ class ScryfallClient:
         self._last_request = time.monotonic()
 
     def _get(self, url: str) -> Optional[dict]:
-        self._rate_limit()
-        try:
-            r = self._session.get(url, timeout=15)
-            if r.status_code == 404:
+        for attempt in range(MAX_RETRIES):
+            self._rate_limit()
+            try:
+                r = self._session.get(url, timeout=15)
+                if r.status_code == 404:
+                    return None
+                # Retry transient throttling/server errors.
+                if r.status_code in (429, 500, 502, 503, 504):
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(RETRY_BACKOFF_SEC * (attempt + 1))
+                        continue
+                    return None
+                r.raise_for_status()
+                return r.json()
+            except requests.RequestException:
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(RETRY_BACKOFF_SEC * (attempt + 1))
+                    continue
                 return None
-            r.raise_for_status()
-            return r.json()
-        except requests.RequestException:
-            return None
+        return None
 
     def get_by_id(self, scryfall_id: str) -> Optional[dict]:
         """Lookup by Scryfall UUID: GET /cards/{id}."""
@@ -76,6 +91,17 @@ class ScryfallClient:
         if not name or len(name) < 2:
             return None
         params = {"fuzzy": name}
+        if set_code:
+            params["set"] = set_code.lower()
+        qs = urllib.parse.urlencode(params)
+        url = f"https://api.scryfall.com/cards/named?{qs}"
+        return self._get(url)
+
+    def get_by_exact_name(self, name: str, set_code: Optional[str] = None) -> Optional[dict]:
+        """Exact name lookup. Avoids fuzzy matching to the wrong card."""
+        if not name or len(name) < 2:
+            return None
+        params = {"exact": name}
         if set_code:
             params["set"] = set_code.lower()
         qs = urllib.parse.urlencode(params)
@@ -114,49 +140,87 @@ class ScryfallClient:
             if card:
                 return card
 
-        # 2. Fuzzy name
+        # 2. Exact name (safer than fuzzy for short names like "Excavator")
+        if card_name:
+            card = self.get_by_exact_name(card_name, set_code)
+            if card:
+                return card
+            # OCR sometimes misreads set code; retry exact name without set constraint.
+            if set_code:
+                card = self.get_by_exact_name(card_name, None)
+                if card:
+                    return card
+
+        # 3. Fuzzy name (accept only if confidence is high)
         if card_name:
             card = self.get_by_fuzzy_name(card_name, set_code)
             if card:
-                return card
+                fuzzy_score = _similarity(card_name, card.get("name", ""))
+                if fuzzy_score >= _minimum_confidence(card_name):
+                    return card
+            # If set code is noisy, retry fuzzy without set.
+            if set_code:
+                card = self.get_by_fuzzy_name(card_name, None)
+                if card:
+                    fuzzy_score = _similarity(card_name, card.get("name", ""))
+                    if fuzzy_score >= _minimum_confidence(card_name):
+                        return card
 
-        # 3. Search
+        # 4. Search
         if not card_name:
             return None
 
         results = self.search(card_name)
-        if not results:
-            return None
+        if results:
+            if len(results) == 1:
+                only = results[0]
+                if _similarity(card_name, only.get("name", "")) >= _minimum_confidence(card_name):
+                    return only
+                return None
 
-        if len(results) == 1:
-            return results[0]
+            # Multiple results: pick best by similarity, or ask user
+            best = _best_match(card_name, results)
+            if best and on_ambiguous:
+                candidates = _top_n_similar(card_name, results, 3)
+                chosen = on_ambiguous(card_name, candidates)
+                if chosen is not None:
+                    return chosen
+            if best and _similarity(card_name, best.get("name", "")) >= _minimum_confidence(card_name):
+                return best
 
-        # Multiple results: pick best by similarity, or ask user
-        best = _best_match(card_name, results)
-        if best and on_ambiguous:
-            candidates = _top_n_similar(card_name, results, 3)
-            chosen = on_ambiguous(card_name, candidates)
-            if chosen is not None:
-                return chosen
-            return best
-        return best
+        return None
 
 
 def _similarity(a: str, b: str) -> float:
-    """Simple string similarity (0-1)."""
+    """Name similarity (0-1), robust to OCR typos and extra words."""
     a = a.lower().strip()
     b = b.lower().strip()
     if not a or not b:
         return 0.0
     if a == b:
         return 1.0
-    # Jaccard-like: overlap of words
-    wa = set(a.split())
-    wb = set(b.split())
-    if not wa:
-        return 0.0
-    inter = len(wa & wb)
-    return inter / len(wa)
+    wa = set(_tokens(a))
+    wb = set(_tokens(b))
+    token_jaccard = (len(wa & wb) / len(wa | wb)) if (wa or wb) else 0.0
+    seq_ratio = SequenceMatcher(None, a, b).ratio()
+    return max(token_jaccard, seq_ratio)
+
+
+def _tokens(s: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", s.lower())
+
+
+def _minimum_confidence(query_name: str) -> float:
+    """
+    Confidence threshold based on query specificity.
+    Short/single-word names need stricter matching to avoid false positives.
+    """
+    token_count = len(_tokens(query_name))
+    if token_count <= 1:
+        return 0.82
+    if token_count == 2:
+        return 0.72
+    return 0.65
 
 
 def _best_match(name: str, cards: list[dict]) -> Optional[dict]:
