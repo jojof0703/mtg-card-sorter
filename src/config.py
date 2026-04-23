@@ -24,3 +24,7 @@ def get_vision_credentials_path() -> Path:
     and create a service account. Never commit it to git (it contains secrets).
     """
     return DEFAULT_CREDENTIALS_PATH
+
+# Serial communication settings for Arduino
+SERIAL_PORT = "COM3"  # Double-check this in Arduino IDE (Tools > Port)
+SERIAL_BAUD = 9600
