@@ -16,8 +16,8 @@ def process_and_sort(card_record):
     # wrap the card in a list because sort_card_type expects a list
     result_dict = sort_card_type([card_record])
     
-    # Find which bucket the card landed in (e.g., "Creatures")
-    # This finds the first key that has a non-empty list
+    # find which bucket the card landed in ("Creatures")
+    # finds the first key that has a non-empty list
     category = next(key for key, val in result_dict.items() if val)
 
     print(f"Detected: {card_record.name} | Category: {category}")
