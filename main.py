@@ -3,10 +3,6 @@ import time
 from src.config import SERIAL_PORT, SERIAL_BAUD
 from src.sorting import sort_card_type
 
-# serial communication settings
-SERIAL_PORT = "COM3"  #make sure this matches your Arduino port number
-SERIAL_BAUD = 9600
-
 # int hardware connection
 # The timeout=1 ensures the script doesn't hang forever if the Arduino is unplugged
 ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=1)
