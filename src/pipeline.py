@@ -17,10 +17,10 @@ We cache OCR and Scryfall results to avoid repeating API calls.
 import re
 from pathlib import Path
 from typing import Callable, Optional
-
+import numpy as np # Add this import
+from src.ocr import extract_text_from_image, extract_text_from_bytes
 from src.cache import get_cached_card, get_cached_ocr, parsed_key, set_cached_card, set_cached_ocr
 from src.models import CardRecord
-from src.ocr import extract_text_from_image
 from src.ocr_parser import parse_ocr_name_candidates, parse_ocr_text, ParsedOCR
 from src.scryfall_client import ScryfallClient
 
@@ -64,26 +64,52 @@ def _is_cache_safe(parsed: ParsedOCR, record: CardRecord, query_name: Optional[s
     return True
 
 
+import numpy as np
+import cv2
+
 def process_image(
-    image_path: str | Path,
+    image_path: str | Path | np.ndarray,   # <-- add np.ndarray
     scryfall: ScryfallClient,
-    on_ambiguous: Optional[Callable[[str, list[dict]], Optional[dict]]] = None,
+    on_ambiguous=None,
     use_cache: bool = True,
 ) -> tuple[Optional[CardRecord], Optional[str]]:
-    """
-    Process one image: OCR -> parse -> Scryfall -> CardRecord.
 
-    Args:
-        image_path: Path to the card image file (PNG, JPG, etc.)
-        scryfall: Client for looking up cards on Scryfall
-        on_ambiguous: Optional callback when multiple cards match; user picks one
-        use_cache: If True, reuse cached OCR and Scryfall results
+    # --- NEW: handle live camera frames ---
+    if isinstance(image_path, np.ndarray):
+        try:
+            _, buf = cv2.imencode(".png", image_path)
+            text = extract_text_from_bytes(buf.tobytes())
+        except Exception as e:
+            return None, f"OCR failed on frame: {e}"
+        if not text or not text.strip():
+            return None, "OCR could not extract text from frame."
+        # Skip straight to parse — no path, no file cache
+        parsed = parse_ocr_text(text)
+        if not parsed.card_name and not (parsed.set_code and parsed.collector_number):
+            return None, "Could not extract card name or set+number from frame."
+        used_query_name = parsed.card_name
+        card_data = scryfall.identify_card(
+            parsed.collector_number, parsed.set_code, used_query_name,
+            on_ambiguous=on_ambiguous,
+        )
+        if not card_data:
+            for candidate in parse_ocr_name_candidates(text, max_candidates=5):
+                if not candidate or candidate.lower() == (used_query_name or "").lower():
+                    continue
+                card_data = scryfall.identify_card(
+                    parsed.collector_number, parsed.set_code, candidate,
+                    on_ambiguous=on_ambiguous,
+                )
+                if card_data:
+                    break
+        if not card_data:
+            return None, f"Could not identify card (name: {parsed.card_name})."
+        return CardRecord.from_scryfall(card_data), None
+    # --- end numpy branch ---
 
-    Returns:
-        (CardRecord, None) on success, or (None, error_message) on failure.
-        Error messages are user-friendly (e.g. "Re-take photo with better lighting").
-    """
+    # ... rest of the original function unchanged ...
     path = Path(image_path)
+    
     if not path.exists():
         return None, f"File not found: {path}"
 

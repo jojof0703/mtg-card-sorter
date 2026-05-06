@@ -39,4 +39,4 @@ def process_and_sort(card_record):
 if __name__ == "__main__":
     # trigger the camera/OCR
     print("MTG Sorter Online...")
-    # ex:process_and_sort(current_scanned_card)
+    # ex:process_and_sort(current_scanned_card)  

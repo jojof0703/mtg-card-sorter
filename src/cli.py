@@ -17,10 +17,11 @@ set code (e.g. "M21"), and collector number (e.g. "123/280").
 """
 
 import argparse
+import concurrent.futures
 import json
 import sys
 from pathlib import Path
-
+from main import process_and_sort
 from src.cache import _cache_dir
 from src.models import CardRecord
 import cv2
@@ -28,57 +29,96 @@ import time
 
 from src.pipeline import process_image
 
-
 def run_camera_scan(scryfall):
     import cv2
     import time
+    import threading
 
     cam = cv2.VideoCapture(1)
+    cam.set(cv2.CAP_PROP_FPS, 30)
+    cam.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-    last_time = 0
-    cooldown = 2
+    latest_frame = [None]
+    lock = threading.Lock()
+    stop_flag = [False]
+
+    def frame_grabber():
+        while not stop_flag[0]:
+            ret, frame = cam.read()
+            if ret:
+                with lock:
+                    latest_frame[0] = (frame, time.time())  # tag each frame with NOW
+            time.sleep(0.001)
+
+    t = threading.Thread(target=frame_grabber, daemon=True)
+    t.start()
+
+    # Wait a moment then set a "valid after" cutoff — discard anything older
+    time.sleep(0.3)
+    valid_after = time.time()
+
+    last_scan_time = 0
+    cooldown = 0.5  # Reduced from 2 seconds to scan faster (Vision API is the main bottleneck)
     last_result = None
+    pending_scan = None
 
-    print("Starting camera... press Q to quit")
+    def scan_frame(frame_to_scan):
+        try:
+            return process_image(frame_to_scan, scryfall)
+        except Exception as e:
+            return None, f"OCR error: {e}"
 
-    while True:
-        ret, frame = cam.read()
-        if not ret:
-            continue
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        print("Starting camera... press Q to quit")
 
-        #h, w, _ = frame.shape
-        #frame_crop = frame[int(h*0.2):int(h*0.8), int(w*0.2):int(w*0.8)]
+        while True:
+            with lock:
+                frame_data = latest_frame[0]
 
-        now = time.time()
+            if frame_data is None:
+                time.sleep(0.005)
+                continue
 
-        if now - last_time > cooldown:
-            try:
-                record, err = process_image(frame, scryfall)
-            except Exception as e:
-                print("OCR error:", e)
-                record = None
+            frame, frame_ts = frame_data
 
-            last_time = now
+            # Skip stale frames
+            if frame_ts < valid_after:
+                continue
 
-            if record:
-                last_result = record
-                print("CARD:", getattr(record, "name", record))
+            now = time.time()
 
-        if last_result:
-            cv2.putText(
-                frame,
-                getattr(last_result, "name", str(last_result)),
-                (20, 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,
-                (0, 255, 0),
-                2,
-            )
+            # Allow up to 2 pending scans (one current, one queued)
+            if pending_scan is None and now - last_scan_time > cooldown:
+                pending_scan = executor.submit(scan_frame, frame.copy())
+                last_scan_time = now
 
-        cv2.imshow("MTG Camera Scan", frame)
+            if pending_scan is not None and pending_scan.done():
+                record, err = pending_scan.result()
+                pending_scan = None
+                if record:
+                    last_result = record
+                    print("CARD:", getattr(record, "name", record))
+                    process_and_sort(record)
+                elif err:
+                    print(err)
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+            display = frame.copy()
+            if last_result:
+                cv2.putText(
+                    display,
+                    getattr(last_result, "name", str(last_result)),
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1,
+                    (0, 255, 0),
+                    2,
+                )
+
+            cv2.imshow("MTG Camera Scan", display)
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                stop_flag[0] = True
+                break
 
     cam.release()
     cv2.destroyAllWindows()

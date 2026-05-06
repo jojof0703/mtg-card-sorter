@@ -1,72 +1,160 @@
-#include <Servo.h>//to send signals to motors
+#include <AccelStepper.h>
+#include <Servo.h>
 
-//current .ino turns  arduino into a slave device that waits for orders from the python master script
+// ── Hardware ──────────────────────────────────────────────────────────────────
+AccelStepper myStepper(AccelStepper::FULL4WIRE, 8, 9, 10, 11);
+Servo s1, s2, s3, s4;
 
-Servo pusherServo;//create Servo object to control motor
-const int PUSHER_PIN = 9;//tells arduino the signal wire pusher is plugged into Digital Pin 9
-const int BELT_MOTOR_PIN = 10;//digital pin 10 to control belt movement
+// ── Servo positions ───────────────────────────────────────────────────────────
+const int LEFT_REST    = 30;
+const int LEFT_PUSHED  = 200;
+const int RIGHT_REST   = 150;
+const int RIGHT_PUSHED = 0;
 
-//angles for pushers
-const int POS_RETRACTED = 0;  //for cards to pass
-const int POS_PUSH      = 90; //extended for push
+int pos1 = LEFT_REST,  pos2 = LEFT_REST;
+int pos3 = RIGHT_REST, pos4 = RIGHT_REST;
+unsigned long lastServoTime[4] = {0, 0, 0, 0};
 
-// timing (How long does it take for a card to get from the sensor to the bin)
-// change the time based on measurements not sure what they exactly are so they need to be adjusted post testing
-const int TRAVEL_TIME_CREATURES = 1500; //measured milliseconds
-const int TRAVEL_TIME_LANDS     = 1500; 
-const int TRAVEL_TIME_PERMANENTS= 3500;
-const int TRAVEL_TIME_SPELLS    = 3500;
+// ── Travel / motor timing ─────────────────────────────────────────────────────
+const unsigned long TRAVEL_CREATURES  = 4350;
+const unsigned long TRAVEL_LANDS      = 9500;
+const unsigned long TRAVEL_PERMANENTS = 9500;
+const unsigned long TRAVEL_SPELLS     = 4350;
 
-// Create 4 Servo objects
-Servo pusher1, pusher2, pusher3, pusher4;
+// ── State machine ─────────────────────────────────────────────────────────────
+enum State {
+  IDLE,
+  BELT_RUN,     // motor runs for full travel duration, then stops
+  SERVO_A_UP,   // raise first servo
+  SERVO_B_UP,   // raise second servo
+  SERVOS_DOWN,  // lower both servos
+  DONE_WAIT     // brief pause then send DONE
+};
 
-void setup() {//setup and attach each pusher and make them retracted
-  Serial.begin(9600);
-  
-  //attach servos to pins 2, 3, 4, and 5
-  pusher1.attach(2);
-  pusher2.attach(3);
-  pusher3.attach(4);
-  pusher4.attach(5);
+State currentState = IDLE;
 
-  //go to retracted position
-  pusher1.write(POS_RETRACTED);
-  pusher2.write(POS_RETRACTED);
-  pusher3.write(POS_RETRACTED);
-  pusher4.write(POS_RETRACTED);
-}
+int    *pPosA = nullptr; Servo *pServoA = nullptr; int targetUpA = 0;
+int    *pPosB = nullptr; Servo *pServoB = nullptr; int targetUpB = 0;
+int    restA  = 0, restB = 0;
+unsigned long *pTimeA = nullptr, *pTimeB = nullptr;
 
-void loop() {
-  if (Serial.available() > 0) {//if cards available then if not loop nothing until then
-    String binName = Serial.readStringUntil('\n');//grabs the text and stops once it sees the newline character that python sends at the end of the line
-    binName.trim();//cleans up text removing any hidden spaces
+unsigned long phaseStart  = 0;
+unsigned long travelDelay = 0;
 
-    if (binName == "Creatures") {//if creatures
-      delay(TRAVEL_TIME_CREATURES);
-      triggerPusher(pusher1);
-    } 
-    else if (binName == "Lands") {//if lands
-      delay(TRAVEL_TIME_LANDS);
-      triggerPusher(pusher2);
-    }
-    else if (binName == "Permanents") {//if permanents
-      delay(TRAVEL_TIME_PERMANENTS);
-      triggerPusher(pusher3);
-    }
-    else if (binName == "Spells") {//if spells
-      delay(TRAVEL_TIME_SPELLS);
-      triggerPusher(pusher4);
-    }
-    else { // Everything else goes to the last bucket which is at the very end
-    }
-
-    Serial.println("DONE");
+// ── Helpers ───────────────────────────────────────────────────────────────────
+bool moveServo(int *pos, Servo &s, int target, int speed, unsigned long &lastTime) {
+  if (millis() - lastTime >= 10) {
+    if      (*pos < target) *pos = min(*pos + speed, target);
+    else if (*pos > target) *pos = max(*pos - speed, target);
+    s.write(*pos);
+    lastTime = millis();
+    return (*pos == target);
   }
+  return false;
 }
 
-void triggerPusher(Servo &s) {//helper function to fire a specific servo
-  s.write(POS_PUSH);//tells the motor which one to swing out to the pushing position based on s
-  delay(400);//delay 0.4 sec
-  s.write(POS_RETRACTED);//retract
-  delay(200);//delay 0.2 sec
+void runMotor() {
+  myStepper.setSpeed(-600);
+  myStepper.runSpeed(); 
+}
+
+void scheduleSort(int *posA, Servo &sA, int upA, int downA, unsigned long &tA,
+                  int *posB, Servo &sB, int upB, int downB, unsigned long &tB,
+                  unsigned long travel) {
+  pPosA = posA;  pServoA = &sA;  targetUpA = upA;  restA = downA;  pTimeA = &tA;
+  pPosB = posB;  pServoB = &sB;  targetUpB = upB;  restB = downB;  pTimeB = &tB;
+  travelDelay  = travel;
+  phaseStart   = millis();
+  myStepper.enableOutputs();
+  currentState = BELT_RUN;
+}
+
+// ── Setup ─────────────────────────────────────────────────────────────────────
+void setup() {
+  Serial.begin(9600);
+  myStepper.setMaxSpeed(1000.0);
+
+  myStepper.disableOutputs();
+  s1.attach(2); s2.attach(3); s3.attach(4); s4.attach(5);
+  s1.write(LEFT_REST);  s2.write(LEFT_REST);
+  s3.write(RIGHT_REST); s4.write(RIGHT_REST);
+}
+
+// ── Main loop ─────────────────────────────────────────────────────────────────
+void loop() {
+
+  // Only accept new commands when idle
+  if (currentState == IDLE && Serial.available() > 0) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+
+    if (cmd == "Creatures") {
+      scheduleSort(&pos1, s1, LEFT_PUSHED,  LEFT_REST,  lastServoTime[0],
+                   &pos4, s4, RIGHT_PUSHED, RIGHT_REST, lastServoTime[3],
+                   TRAVEL_CREATURES);
+    }
+    else if (cmd == "Lands") {
+      scheduleSort(&pos2, s2, LEFT_PUSHED,  LEFT_REST,  lastServoTime[1],
+                   &pos3, s3, RIGHT_PUSHED, RIGHT_REST, lastServoTime[2],
+                   TRAVEL_LANDS);
+    }
+    else if (cmd == "Permanents") {
+      scheduleSort(&pos3, s3, RIGHT_PUSHED, RIGHT_REST, lastServoTime[2],
+                   &pos2, s2, LEFT_PUSHED,  LEFT_REST,  lastServoTime[1],
+                   TRAVEL_PERMANENTS);
+    }
+    else if (cmd == "Spells") {
+      scheduleSort(&pos4, s4, RIGHT_PUSHED, RIGHT_REST, lastServoTime[3],
+                   &pos1, s1, LEFT_PUSHED,  LEFT_REST,  lastServoTime[0],
+                   TRAVEL_SPELLS);
+    }
+    else {
+      // Default bin — card rides to the end on its own
+      Serial.println("DONE");
+    }
+  }
+
+  // ── State machine ────────────────────────────────────────────────────────
+  switch (currentState) {
+
+    case IDLE:
+      myStepper.disableOutputs();
+      break;
+
+    // Belt runs for the full travel duration, then stops
+    case BELT_RUN:
+      runMotor();
+      if (millis() - phaseStart >= travelDelay) {
+        myStepper.disableOutputs();   // belt stops here
+        currentState = SERVO_A_UP;
+      }
+      break;
+
+    // Raise first servo, motor stays off
+    case SERVO_A_UP:
+      if (moveServo(pPosA, *pServoA, targetUpA, 1, *pTimeA))
+        currentState = SERVO_B_UP;
+      break;
+
+    // Raise second servo, motor stays off
+    case SERVO_B_UP:
+      if (moveServo(pPosB, *pServoB, targetUpB, 1, *pTimeB))
+        currentState = SERVOS_DOWN;
+      break;
+
+    // Lower both servos back to rest, motor stays off
+    case SERVOS_DOWN: {
+      bool dA = moveServo(pPosA, *pServoA, restA, 1, *pTimeA);
+      bool dB = moveServo(pPosB, *pServoB, restB, 1, *pTimeB);
+      if (dA && dB)
+        currentState = DONE_WAIT;
+      break;
+    }
+
+    // Small pause to let servos fully settle, then signal completion
+    case DONE_WAIT:
+      Serial.println("DONE");
+      currentState = IDLE;
+      break;
+  }
 }
